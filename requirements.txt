@@ -1,0 +1,4 @@
+# requirements.txt
+pyinstaller==6.3.0
+requests==2.31.0
+
