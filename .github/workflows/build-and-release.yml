@@ -22,7 +22,6 @@ jobs:
           $commitCount = (git rev-list --count origin/main --since "$date 00:00:00").ToString()
           $version = "v$date.$commitCount"
           echo "version=$version" >> $env:GITHUB_OUTPUT
-          echo "自动生成版本号：$version"
 
       - name: 安装Python
         uses: actions/setup-python@v5
@@ -32,30 +31,15 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pyinstaller==6.3.0 requests==2.31.0
 
-      - name: 准备内置ADB（PowerShell兼容版）
+      - name: 准备内置ADB
         run: |
-          if (-not (Test-Path -Path "tools")) {
-            New-Item -ItemType Directory -Path "tools" | Out-Null
-          }
-          
-          $adbZipUrl = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
-          $adbZipPath = "tools/adb.zip"
-          Invoke-WebRequest -Uri $adbZipUrl -OutFile $adbZipPath -UseBasicParsing
-          
-          Expand-Archive -Path $adbZipPath -DestinationPath "tools" -Force
-          
-          $sourceAdb = "tools/platform-tools/adb.exe"
-          $targetAdb = "tools/adb.exe"
-          if (Test-Path -Path $sourceAdb) {
-            Move-Item -Path $sourceAdb -Destination $targetAdb -Force
-          } else {
-            Write-Error "未找到adb.exe"
-            exit 1
-          }
-          
-          Remove-Item -Path $adbZipPath -Force
+          if (-not (Test-Path "tools")) { New-Item -ItemType Directory -Path "tools" | Out-Null }
+          Invoke-WebRequest -Uri "https://dl.google.com/android/repository/platform-tools-latest-windows.zip" -OutFile "tools/adb.zip" -UseBasicParsing
+          Expand-Archive -Path "tools/adb.zip" -DestinationPath "tools" -Force
+          Move-Item -Path "tools/platform-tools/adb.exe" -Destination "tools/adb.exe" -Force
+          Remove-Item -Path "tools/adb.zip" -Force
           Remove-Item -Path "tools/platform-tools" -Recurse -Force
 
       - name: 编译为单文件exe
@@ -63,36 +47,30 @@ jobs:
           pyinstaller --onefile `
             --name "ydp_adb_tool-${{ steps.version.outputs.version }}" `
             --add-data "tools/adb.exe;." `
-            --hidden-import "requests" `
             main.py
 
       - name: 生成发布说明
         run: |
-          echo "自动发布：${{ steps.version.outputs.version }}" | Out-File -FilePath release_notes.txt -Encoding utf8
-          echo "提交信息：${{ github.event.head_commit.message }}" | Out-File -FilePath release_notes.txt -Encoding utf8 -Append
-          echo "发布时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")" | Out-File -FilePath release_notes.txt -Encoding utf8 -Append
+          "@自动发布：${{ steps.version.outputs.version }}`n提交信息：${{ github.event.head_commit.message }}`n发布时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")" | Out-File -FilePath "release_notes.txt" -Encoding utf8
 
-      - name: 删除旧标签（PowerShell兼容版）
+      - name: 处理标签（跳过错误）
         run: |
-          # Windows中用$null替代/dev/null
-          git tag -d ${{ steps.version.outputs.version }} 2>$null || $true
-          git push origin --delete ${{ steps.version.outputs.version }} 2>$null || $true
+          # 忽略标签不存在的错误，直接执行后续步骤
+          try { git tag -d ${{ steps.version.outputs.version }} } catch {}
+          try { git push origin --delete ${{ steps.version.outputs.version }} } catch {}
 
       - name: 创建并推送新标签
         run: |
           git config --global user.name "GitHub Actions"
           git config --global user.email "actions@github.com"
-          git tag -a ${{ steps.version.outputs.version }} -m "自动发布版本 ${{ steps.version.outputs.version }}"
+          git tag -a ${{ steps.version.outputs.version }} -m "自动发布"
           git push origin ${{ steps.version.outputs.version }}
 
       - name: 发布到Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.version }}
-          body_path: release_notes.txt
-          files: |
-            dist/ydp_adb_tool-${{ steps.version.outputs.version }}.exe
-          draft: false
-          prerelease: false
+          body_path: "release_notes.txt"
+          files: "dist/ydp_adb_tool-${{ steps.version.outputs.version }}.exe"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
