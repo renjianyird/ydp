@@ -1,11 +1,10 @@
-# .github/workflows/build-and-release.yml
-name: 编译并发布单文件工具
+name: 自动编译并发布Release
 
-# 触发条件：推送标签（如 v1.0.0）时自动运行
+# 触发条件：主分支有新推送时自动运行
 on:
   push:
-    tags:
-      - 'v*'  # 匹配 v1.0.0、v2.1.1 等标签
+    branches:
+      - main  # 监听主分支的所有推送
 
 jobs:
   build:
@@ -13,8 +12,20 @@ jobs:
     steps:
       - name: 拉取代码
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 拉取所有历史，用于计算commit计数
 
-      - name: 安装 Python
+      - name: 生成自动版本号（日期+commit计数）
+        id: version
+        run: |
+          # 格式：v20240520.1（年月日.当日第几个commit）
+          $date = Get-Date -Format "yyyyMMdd"
+          $commitCount = (git rev-list --count origin/main --since "$date 00:00:00").ToString()
+          $version = "v$date.$commitCount"
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          echo "自动生成版本号：$version"
+
+      - name: 安装Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -22,39 +33,50 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller requests
+          pip install -r requirements.txt  # 依赖来自requirements.txt
 
-      - name: 准备内置资源（如迷你ADB）
+      - name: 准备内置ADB
         run: |
-          # 自动下载迷你ADB（Windows版）
           mkdir -p tools
-          curl -L -o tools/adb.exe https://dl.google.com/android/repository/platform-tools-latest-windows.zip
-          # 解压ADB（需系统自带tar，Windows 10+已内置）
-          tar -xf tools/adb.exe -C tools platform-tools/adb.exe --strip-components=1
-          rm tools/adb.exe  # 移除压缩包，仅保留adb.exe
+          # 下载并解压迷你ADB
+          curl -L -o tools/adb.zip https://dl.google.com/android/repository/platform-tools-latest-windows.zip
+          tar -xf tools/adb.zip -C tools platform-tools/adb.exe --strip-components=1
+          del tools/adb.zip
 
       - name: 编译为单文件exe
         run: |
           pyinstaller --onefile ^
-            --name "ydp_adb_tool" ^
-            --add-data "tools/adb.exe;." ^  # 内置ADB到exe
+            --name "ydp_adb_tool-${{ steps.version.outputs.version }}" ^  # 文件名包含版本号
+            --add-data "tools/adb.exe;." ^
             --hidden-import "requests" ^
             main.py
 
       - name: 生成发布说明
         run: |
-          echo "有道词典笔ADB权限获取工具（单文件版）" > release_notes.txt
-          echo "发布版本：${{ github.ref_name }}" >> release_notes.txt
-          echo "使用说明：双击运行，按提示输入设备信息和密码即可" >> release_notes.txt
+          echo "自动发布：${{ steps.version.outputs.version }}" > release_notes.txt
+          echo "提交信息：${{ github.event.head_commit.message }}" >> release_notes.txt
+          echo "发布时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")" >> release_notes.txt
+
+      - name: 删除旧标签（若存在）
+        run: |
+          git tag -d ${{ steps.version.outputs.version }} 2>/dev/null || true
+          git push origin --delete ${{ steps.version.outputs.version }} 2>/dev/null || true
+
+      - name: 创建并推送新标签
+        run: |
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git tag -a ${{ steps.version.outputs.version }} -m "自动发布版本 ${{ steps.version.outputs.version }}"
+          git push origin ${{ steps.version.outputs.version }}
 
       - name: 发布到Release
         uses: softprops/action-gh-release@v2
         with:
-          body_path: release_notes.txt  # 发布说明
+          tag_name: ${{ steps.version.outputs.version }}
+          body_path: release_notes.txt
           files: |
-            dist/ydp_adb_tool.exe  # 单文件产物
-          draft: false  # 直接发布，不设为草稿
-          prerelease: false  # 不设为预发布
+            dist/ydp_adb_tool-${{ steps.version.outputs.version }}.exe
+          draft: false
+          prerelease: false
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # 自动获取仓库令牌
-
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
