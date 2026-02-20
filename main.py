@@ -2,31 +2,27 @@ import os
 import json
 import hashlib
 import subprocess
-import requests
 import time
 import shutil
 from pathlib import Path
-from scapy.all import sniff, TCP, Raw  # 用于抓包
 
 
 class AutoYoudaoADB:
     def __init__(self):
-        # 下载目录改为程序运行的同目录
+        # 工作目录为程序同目录
         self.work_dir = Path(os.path.dirname(os.path.abspath(__file__)))
-        self.work_dir.mkdir(exist_ok=True)
         self.config = {
-            "device_info": None,
             "new_password": None,
-            "firmware_url": None,
-            "firmware_path": self.work_dir / "full_package.img",
+            "firmware_path": None,  # 手动指定的本地全量包路径
             "modified_firmware": self.work_dir / "modified_package.img",
             "local_ip": self.get_local_ip(),
             "server_port": 14514,
-            "captured": False  # 标记是否完成抓包
+            "original_md5": None,   # 从固件中提取的原始MD5
+            "new_md5": None         # 新密码的MD5
         }
 
     def get_local_ip(self):
-        """自动获取本机局域网IP"""
+        """获取本机局域网IP"""
         import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
@@ -35,248 +31,188 @@ class AutoYoudaoADB:
         finally:
             s.close()
 
-    def step1_auto_capture_device_info(self):
-        """内置抓包：自动捕获词典笔的更新请求参数"""
-        print("=== 【步骤1：自动抓包】请让词典笔连接当前网络并点击「检查更新」 ===")
-        print("提示：抓包将持续60秒，超时会自动转为手动输入")
-        device_info = {}
-
-        # 抓包回调函数：过滤更新请求
-        def capture_callback(packet):
-            if TCP in packet and packet[TCP].dport == 443 and Raw in packet:
-                try:
-                    payload = packet[Raw].load.decode("utf-8", errors="ignore")
-                    # 匹配更新请求的接口路径
-                    if "/ota/checkVersion" in payload and "productId" in payload:
-                        # 提取JSON参数
-                        json_start = payload.find("{")
-                        json_end = payload.rfind("}") + 1
-                        if json_start != -1 and json_end != -1:
-                            req_json = json.loads(payload[json_start:json_end])
-                            device_info.update({
-                                "timestamp": req_json["timestamp"],
-                                "sign": req_json["sign"],
-                                "mid": req_json["mid"],
-                                "productId": req_json["productId"]
-                            })
-                            self.config["captured"] = True
-                            print("\n✅ 成功捕获设备信息！")
-                            print(f"timestamp: {device_info['timestamp']}")
-                            print(f"sign: {device_info['sign']}")
-                            print(f"mid: {device_info['mid']}")
-                            print(f"productId: {device_info['productId']}")
-                            # 停止抓包
-                            raise KeyboardInterrupt
-                except:
-                    pass
-
-        # 开始抓包（监听所有网络接口，持续60秒）
-        try:
-            sniff(prn=capture_callback, timeout=60, store=0)
-        except KeyboardInterrupt:
-            pass
-
-        if not self.config["captured"]:
-            print("\n❌ 抓包超时，请手动输入设备信息")
-            self.step1_input_device_info()
-        else:
-            self.config["device_info"] = device_info
-            with open(self.work_dir / "device_info.json", "w") as f:
-                json.dump(device_info, f)
-
-    def step1_input_device_info(self):
-        """手动输入设备信息（抓包失败时备用）"""
-        print("\n=== 【步骤1：手动输入设备信息】请输入抓包获取的参数 ===")
-        self.config["device_info"] = {
-            "timestamp": input("timestamp: "),
-            "sign": input("sign: "),
-            "mid": input("mid: "),
-            "productId": input("productId: ")
-        }
-        self.config["captured"] = True
-        with open(self.work_dir / "device_info.json", "w") as f:
-            json.dump(self.config["device_info"], f)
+    def step1_select_firmware(self):
+        """手动选择本地全量包"""
+        print("=== 【步骤1：选择本地全量包】 ===")
+        default_path = self.work_dir / "full_package.img"
+        if default_path.exists():
+            use_default = input(f"检测到同目录下有full_package.img，是否使用？(y/n): ").strip().lower()
+            if use_default == 'y':
+                self.config["firmware_path"] = default_path
+                print(f"已选择固件：{self.config['firmware_path']}")
+                return
+        
+        # 手动输入路径
+        while True:
+            firmware_path = input("请输入本地全量包的路径（如D:/firmware.img）: ").strip()
+            if Path(firmware_path).exists():
+                self.config["firmware_path"] = Path(firmware_path)
+                print(f"已选择固件：{self.config['firmware_path']}")
+                break
+            else:
+                print("路径不存在，请重新输入！")
 
     def step2_set_password(self):
-        """设置新密码（抓包完成后才执行）"""
-        if not self.config["captured"]:
-            print("\n❌ 请先完成抓包，再设置密码")
-            self.step1_auto_capture_device_info()
+        """设置新ADB密码并计算MD5"""
         print("\n=== 【步骤2：设置ADB密码】 ===")
-        self.config["new_password"] = input("请设置新的ADB密码: ").strip()
+        while True:
+            self.config["new_password"] = input("请设置新的ADB密码: ").strip()
+            confirm = input("请再次确认密码: ").strip()
+            if self.config["new_password"] == confirm and self.config["new_password"]:
+                break
+            print("密码不一致或为空，请重新输入！")
+        
+        # 计算带换行符的MD5（关键步骤，与固件逻辑匹配）
         password_with_newline = self.config["new_password"] + "\n"
         self.config["new_md5"] = hashlib.md5(password_with_newline.encode()).hexdigest()
         print(f"自动计算带换行符的密码MD5: {self.config['new_md5']}")
 
-    def step3_fetch_firmware_url(self):
-        """自动获取固件链接（抓包完成后才执行）"""
-        if not self.config["device_info"]:
-            if (self.work_dir / "device_info.json").exists():
-                with open(self.work_dir / "device_info.json", "r") as f:
-                    self.config["device_info"] = json.load(f)
-                    self.config["captured"] = True
-            else:
-                print("\n❌ 请先完成抓包，再获取固件链接")
-                self.step1_auto_capture_device_info()
-
-        print("\n=== 【步骤3：获取固件链接】 ===")
-        req_data = {**self.config["device_info"],
-            "version": "99.99.90",
-            "networkType": "WIFI"
-        }
-        try:
-            print("正在向服务器请求固件链接...")
-            resp = requests.post(
-                "https://iotapi.abupdate.com/product/ota/checkVersion",
-                json=req_data,
-                headers={"Content-Type": "application/json"},
-                timeout=15
-            )
-            resp.raise_for_status()
-            resp_json = resp.json()
-            if "data" in resp_json and "version" in resp_json["data"]:
-                self.config["firmware_url"] = resp_json["data"]["version"]["fullUrl"]  # 改为全量包链接
-                print(f"成功获取固件链接: {self.config['firmware_url']}")
-            else:
-                raise ValueError("响应中无固件链接")
-        except Exception as e:
-            print(f"获取链接失败: {e}")
-            self.config["firmware_url"] = input("请手动输入全量包固件链接: ")
-
-    def step4_download_firmware(self):
-        """自动下载固件（保存到程序同目录，增加重试）"""
-        if not self.config["firmware_url"]:
-            self.step3_fetch_firmware_url()
-
-        print("\n=== 【步骤4：下载固件】 ===")
-        if self.config["firmware_path"].exists():
-            print(f"固件已存在: {self.config['firmware_path']}，跳过下载")
-            return
-        
-        max_retries = 3
-        for retry in range(max_retries):
-            try:
-                print(f"开始下载（第{retry+1}次尝试）: {self.config['firmware_url']}")
-                print(f"保存路径: {self.config['firmware_path']}")
-                with requests.get(self.config["firmware_url"], stream=True, timeout=30) as r:
-                    r.raise_for_status()
-                    with open(self.config["firmware_path"], "wb") as f:
-                        for chunk in r.iter_content(chunk_size=1024*1024):  # 1MB分块下载
-                            if chunk:
-                                f.write(chunk)
-                                print(f"已下载: {f.tell()//1024//1024}MB", end="\r")
-                print(f"\n下载完成，大小: {self.config['firmware_path'].stat().st_size // 1024 // 1024}MB")
-                return
-            except Exception as e:
-                print(f"\n下载失败: {e}")
-                if retry < max_retries - 1:
-                    print("3秒后重试...")
-                    time.sleep(3)
-        raise Exception("多次下载失败，请检查网络或手动下载固件到该路径")
-
-    def step5_extract_original_md5(self):
-        """自动解包并提取原始MD5（简化版）"""
-        print("\n=== 【步骤5：解包固件】 ===")
-        if not self.config["firmware_path"].exists():
-            self.step4_download_firmware()
-        
+    def step3_extract_original_md5(self):
+        """从固件中提取原始MD5（支持手动提取备用）"""
+        print("\n=== 【步骤3：提取原始MD5】 ===")
+        # 自动解包提取（假设固件是zip格式，根据实际格式调整）
         unpack_dir = self.work_dir / "unpacked"
         unpack_dir.mkdir(exist_ok=True)
-        # 假设固件是zip格式（实际需根据固件类型调整）
         try:
+            print("正在自动解包固件...")
             shutil.unpack_archive(str(self.config["firmware_path"]), str(unpack_dir))
-        except:
-            print("解包失败，请手动解包固件")
-            unpack_dir = Path(input("请输入手动解包的目录路径: "))
+        except Exception as e:
+            print(f"自动解包失败：{e}，请手动解包后提取adbd_auth.sh中的MD5")
+            self.config["original_md5"] = input("请手动输入从adbd_auth.sh中提取的原始MD5: ").strip()
+            return
         
-        # 查找adbd_auth.sh
+        # 自动查找adbd_auth.sh并提取MD5
         auth_script = next(unpack_dir.rglob("adbd_auth.sh"), None)
         if not auth_script:
-            raise FileNotFoundError("未找到adbd_auth.sh，请手动提取MD5")
-        with open(auth_script, "r") as f:
-            content = f.read()
-        self.config["original_md5"] = content.split("\"")[1]
-        print(f"提取到原始MD5: {self.config['original_md5']}")
-
-    def step6_modify_firmware(self):
-        """自动替换MD5"""
-        print("\n=== 【步骤6：修改固件】 ===")
-        if not self.config["firmware_path"].exists():
-            self.step4_download_firmware()
+            print("未找到adbd_auth.sh，请手动提取MD5")
+            self.config["original_md5"] = input("请输入原始MD5: ").strip()
+            return
         
+        with open(auth_script, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        # 假设MD5在类似 'echo "xxx"' 的格式中，根据实际内容调整
+        if '"' in content:
+            self.config["original_md5"] = content.split('"')[1].strip()
+            print(f"自动提取到原始MD5: {self.config['original_md5']}")
+        else:
+            print("未识别到MD5格式，请手动输入")
+            self.config["original_md5"] = input("请输入原始MD5: ").strip()
+
+    def step4_modify_firmware(self):
+        """替换固件中的MD5为新密码的MD5"""
+        print("\n=== 【步骤4：修改固件】 ===")
+        if not self.config["original_md5"] or not self.config["new_md5"]:
+            print("缺少原始MD5或新MD5，无法修改！")
+            return
+        
+        # 复制固件为修改版（保留原文件）
         shutil.copy2(self.config["firmware_path"], self.config["modified_firmware"])
-        # 替换Hex内容
+        print(f"正在修改固件：{self.config['modified_firmware']}")
+        
+        # 替换文件中的原始MD5为新MD5（二进制替换，保证文件大小不变）
         with open(self.config["modified_firmware"], "r+b") as f:
+            original_bytes = self.config["original_md5"].encode()
+            new_bytes = self.config["new_md5"].encode()
+            if len(original_bytes) != len(new_bytes):
+                print("MD5长度不匹配，替换失败！")
+                return
+            
+            replaced = False
             while True:
                 pos = f.tell()
-                chunk = f.read(len(self.config["original_md5"].encode()))
+                chunk = f.read(len(original_bytes))
                 if not chunk:
                     break
-                if chunk == self.config["original_md5"].encode():
+                if chunk == original_bytes:
                     f.seek(pos)
-                    f.write(self.config["new_md5"].encode())
-                    print("✅ MD5替换成功")
-                    return
-        raise ValueError("未找到需要替换的MD5值，请手动替换")
+                    f.write(new_bytes)
+                    replaced = True
+                    break
+            
+            if replaced:
+                print("✅ MD5替换成功，修改后的固件已保存")
+            else:
+                print("❌ 未找到需要替换的MD5，请手动用WinHex替换")
 
-    def step7_calculate_checksums(self):
-        """自动计算校验值"""
-        print("\n=== 【步骤7：计算校验值】 ===")
+    def step5_calculate_checksums(self):
+        """计算修改后固件的校验值（用于验证完整性）"""
+        print("\n=== 【步骤5：计算校验值】 ===")
         if not self.config["modified_firmware"].exists():
-            self.step6_modify_firmware()
+            print("未找到修改后的固件，跳过校验！")
+            return
         
         with open(self.config["modified_firmware"], "rb") as f:
-            self.config["total_md5"] = hashlib.md5(f.read()).hexdigest()
+            md5 = hashlib.md5(f.read()).hexdigest()
         with open(self.config["modified_firmware"], "rb") as f:
-            self.config["total_sha256"] = hashlib.sha256(f.read()).hexdigest()
-        print(f"修改后固件MD5: {self.config['total_md5']}")
-        print(f"修改后固件SHA256: {self.config['total_sha256']}")
-
-    def step8_start_servers(self):
-        """自动启动服务器"""
-        print("\n=== 【步骤8：启动服务器】 ===")
-        if not self.config["modified_firmware"].exists():
-            self.step6_modify_firmware()
+            sha256 = hashlib.sha256(f.read()).hexdigest()
         
-        def run_http():
+        print(f"修改后固件MD5: {md5}")
+        print(f"修改后固件SHA256: {sha256}")
+        with open(self.work_dir / "checksums.txt", "w") as f:
+            f.write(f"MD5: {md5}\nSHA256: {sha256}")
+        print("校验值已保存到checksums.txt")
+
+    def step6_start_servers(self):
+        """启动本地HTTP服务器并修改hosts（劫持更新请求）"""
+        print("\n=== 【步骤6：启动服务器】 ===")
+        if not self.config["modified_firmware"].exists():
+            print("未找到修改后的固件，无法启动服务器！")
+            return
+        
+        # 启动HTTP服务器（提供修改后的固件）
+        def run_http_server():
             os.chdir(str(self.config["modified_firmware"].parent))
             subprocess.run(["python", "-m", "http.server", str(self.config["server_port"])], check=True)
+        
         import threading
-        threading.Thread(target=run_http, daemon=True).start()
-        print(f"HTTP服务器启动: http://{self.config['local_ip']}:{self.config['server_port']}")
-
-        # 修改hosts
+        server_thread = threading.Thread(target=run_http_server, daemon=True)
+        server_thread.start()
+        time.sleep(2)  # 等待服务器启动
+        print(f"HTTP服务器已启动：http://{self.config['local_ip']}:{self.config['server_port']}")
+        
+        # 修改hosts（将更新服务器指向本机）
         if os.name == "nt":
             hosts_path = r"C:\Windows\System32\drivers\etc\hosts"
             try:
-                with open(hosts_path, "r+") as f:
+                with open(hosts_path, "r+", encoding="utf-8") as f:
                     content = f.read()
-                    if "iotapi.abupdate.com" not in content:
-                        f.write(f"\n{self.config['local_ip']} iotapi.abupdate.com\n")
+                    target_line = f"{self.config['local_ip']} iotapi.abupdate.com"
+                    if target_line not in content:
+                        f.write(f"\n{target_line}\n")
+                        print("已修改hosts文件，劫持更新请求到本机")
+                    else:
+                        print("hosts已配置，无需修改")
                 subprocess.run(["ipconfig", "/flushdns"], check=True)
-                print("✅ 已修改hosts并刷新DNS")
+                print("DNS缓存已刷新")
             except PermissionError:
-                print("❌ 请以管理员权限运行程序，否则无法修改hosts")
+                print("❌ 请以管理员权限运行程序，否则无法修改hosts！")
+            except Exception as e:
+                print(f"修改hosts失败：{e}，请手动添加一行：{target_line}")
 
-    def step9_guide_update(self):
-        """提示设备操作"""
-        print("\n=== 【步骤9：设备更新】 ===")
-        print("1. 确保词典笔连接到当前网络")
-        print("2. 在词典笔上点击「检查更新」并安装修改后的固件")
-        input("更新完成并重启设备后，按回车键继续...")
+    def step7_guide_update(self):
+        """指导用户在设备上执行更新"""
+        print("\n=== 【步骤7：设备更新】 ===")
+        print("1. 确保词典笔连接到与电脑相同的网络")
+        print("2. 在词典笔上操作：设置 → 系统更新 → 检查更新")
+        print("3. 等待设备下载并安装修改后的固件（可能需要重启）")
+        input("设备完成更新并重启后，按回车键继续验证ADB...")
 
-    def step10_verify_adb(self):
-        """自动验证ADB"""
-        print("\n=== 【步骤10：验证ADB】 ===")
+    def step8_verify_adb(self):
+        """验证ADB连接（使用内置或同目录的adb.exe）"""
+        print("\n=== 【步骤8：验证ADB】 ===")
         adb_path = self.work_dir / "adb.exe"
         if not adb_path.exists():
-            print("❌ 未找到ADB工具，请确保程序同目录下有adb.exe")
-            return
+            print("未在程序目录找到adb.exe，尝试使用系统环境中的adb...")
+            adb_path = "adb"  # 假设系统环境变量中有adb
         
-        device_ip = input("请输入词典笔的IP地址: ")
+        device_ip = input("请输入词典笔的IP地址（可在设备网络设置中查看）: ").strip()
         try:
-            print(f"正在连接: {device_ip}")
+            # 连接设备
+            print(f"正在连接 {device_ip}...")
             subprocess.run([str(adb_path), "connect", device_ip], check=True, timeout=10)
+            
+            # 验证密码
+            print(f"正在验证密码...")
             proc = subprocess.Popen(
                 [str(adb_path), "shell", "auth"],
                 stdin=subprocess.PIPE,
@@ -285,33 +221,31 @@ class AutoYoudaoADB:
                 text=True
             )
             stdout, stderr = proc.communicate(input=self.config["new_password"], timeout=10)
-            if "success" in stdout.lower():
-                print("✅ ADB权限验证成功！")
+            
+            if "success" in stdout.lower() or proc.returncode == 0:
+                print("✅ ADB验证成功！已获得设备权限")
             else:
-                print(f"❌ 验证失败: {stderr}")
+                print(f"❌ 验证失败，输出：{stderr or stdout}")
         except Exception as e:
-            print(f"❌ ADB操作失败: {e}")
+            print(f"ADB操作失败：{e}")
 
     def run(self):
-        print("=== 有道词典笔ADB自动配置工具 ===")
-        print("提示：请以管理员权限运行本程序，否则可能无法抓包/修改hosts\n")
+        print("=== 有道词典笔ADB配置工具（本地固件版） ===")
+        print("说明：此版本从本地全量包开始处理，需提前准备好固件文件\n")
         try:
-            # 强制先执行抓包
-            if not (self.work_dir / "device_info.json").exists() or not self.config["captured"]:
-                self.step1_auto_capture_device_info()
-            # 按流程执行
-            self.step2_set_password()
-            self.step3_fetch_firmware_url()
-            self.step4_download_firmware()
-            self.step5_extract_original_md5()
-            self.step6_modify_firmware()
-            self.step7_calculate_checksums()
-            self.step8_start_servers()
-            self.step9_guide_update()
-            self.step10_verify_adb()
+            self.step1_select_firmware()      # 选择本地固件
+            self.step2_set_password()         # 设置密码
+            self.step3_extract_original_md5() # 提取原始MD5
+            self.step4_modify_firmware()      # 替换MD5
+            self.step5_calculate_checksums()  # 计算校验值
+            self.step6_start_servers()        # 启动服务器
+            self.step7_guide_update()         # 指导更新
+            self.step8_verify_adb()           # 验证ADB
+        except KeyboardInterrupt:
+            print("\n程序被手动终止")
         except Exception as e:
-            print(f"\n❌ 流程中断: {str(e)}")
-        print("\n=== 操作结束 ===")
+            print(f"\n流程出错：{str(e)}")
+        print("\n=== 所有步骤结束 ===")
 
 
 if __name__ == "__main__":
