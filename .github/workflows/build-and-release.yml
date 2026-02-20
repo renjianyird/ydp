@@ -1,11 +1,10 @@
 # .github/workflows/auto-build-release.yml
 name: 自动编译并发布Release
 
-# 触发条件：主分支有新推送时自动运行
 on:
   push:
     branches:
-      - main  # 监听主分支的所有推送
+      - main
 
 jobs:
   build:
@@ -14,12 +13,11 @@ jobs:
       - name: 拉取代码
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # 拉取所有历史，用于计算commit计数
+          fetch-depth: 0
 
-      - name: 生成自动版本号（日期+commit计数）
+      - name: 生成自动版本号
         id: version
         run: |
-          # 格式：v20240520.1（年月日.当日第几个commit）
           $date = Get-Date -Format "yyyyMMdd"
           $commitCount = (git rev-list --count origin/main --since "$date 00:00:00").ToString()
           $version = "v$date.$commitCount"
@@ -34,11 +32,10 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt  # 依赖来自requirements.txt
+          pip install -r requirements.txt
 
       - name: 准备内置ADB（PowerShell兼容版）
         run: |
-          # 1. 创建tools目录（不存在则创建）
           if (-not (Test-Path -Path "tools")) {
             New-Item -ItemType Directory -Path "tools" | Out-Null
             Write-Host "已创建tools目录"
@@ -46,17 +43,12 @@ jobs:
             Write-Host "tools目录已存在，跳过创建"
           }
           
-          # 2. 下载Android平台工具压缩包
           $adbZipUrl = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
           $adbZipPath = "tools/adb.zip"
-          Write-Host "开始下载ADB压缩包：$adbZipUrl"
           Invoke-WebRequest -Uri $adbZipUrl -OutFile $adbZipPath -UseBasicParsing
           
-          # 3. 解压压缩包
-          Write-Host "解压ADB压缩包到tools目录"
           Expand-Archive -Path $adbZipPath -DestinationPath "tools" -Force
           
-          # 4. 移动adb.exe到tools根目录
           $sourceAdb = "tools/platform-tools/adb.exe"
           $targetAdb = "tools/adb.exe"
           if (Test-Path -Path $sourceAdb) {
@@ -67,17 +59,16 @@ jobs:
             exit 1
           }
           
-          # 5. 清理冗余文件
           Remove-Item -Path $adbZipPath -Force
           Remove-Item -Path "tools/platform-tools" -Recurse -Force
           Write-Host "已清理冗余文件"
 
       - name: 编译为单文件exe
         run: |
-          pyinstaller --onefile ^
-            --name "ydp_adb_tool-${{ steps.version.outputs.version }}" ^  # 文件名包含版本号
-            --add-data "tools/adb.exe;." ^  # 内置ADB到exe
-            --hidden-import "requests" ^
+          pyinstaller --onefile `
+            --name "ydp_adb_tool-${{ steps.version.outputs.version }}" `
+            --add-data "tools/adb.exe;." `
+            --hidden-import "requests" `
             main.py
 
       - name: 生成发布说明
