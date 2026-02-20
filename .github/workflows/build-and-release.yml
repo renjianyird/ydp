@@ -38,9 +38,6 @@ jobs:
         run: |
           if (-not (Test-Path -Path "tools")) {
             New-Item -ItemType Directory -Path "tools" | Out-Null
-            Write-Host "已创建tools目录"
-          } else {
-            Write-Host "tools目录已存在，跳过创建"
           }
           
           $adbZipUrl = "https://dl.google.com/android/repository/platform-tools-latest-windows.zip"
@@ -53,15 +50,13 @@ jobs:
           $targetAdb = "tools/adb.exe"
           if (Test-Path -Path $sourceAdb) {
             Move-Item -Path $sourceAdb -Destination $targetAdb -Force
-            Write-Host "已将adb.exe移动到tools根目录"
           } else {
-            Write-Error "未找到adb.exe，解压失败"
+            Write-Error "未找到adb.exe"
             exit 1
           }
           
           Remove-Item -Path $adbZipPath -Force
           Remove-Item -Path "tools/platform-tools" -Recurse -Force
-          Write-Host "已清理冗余文件"
 
       - name: 编译为单文件exe
         run: |
@@ -73,14 +68,15 @@ jobs:
 
       - name: 生成发布说明
         run: |
-          echo "自动发布：${{ steps.version.outputs.version }}" > release_notes.txt
-          echo "提交信息：${{ github.event.head_commit.message }}" >> release_notes.txt
-          echo "发布时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")" >> release_notes.txt
+          echo "自动发布：${{ steps.version.outputs.version }}" | Out-File -FilePath release_notes.txt -Encoding utf8
+          echo "提交信息：${{ github.event.head_commit.message }}" | Out-File -FilePath release_notes.txt -Encoding utf8 -Append
+          echo "发布时间：$(Get-Date -Format "yyyy-MM-dd HH:mm:ss")" | Out-File -FilePath release_notes.txt -Encoding utf8 -Append
 
-      - name: 删除旧标签（若存在）
+      - name: 删除旧标签（PowerShell兼容版）
         run: |
-          git tag -d ${{ steps.version.outputs.version }} 2>/dev/null || true
-          git push origin --delete ${{ steps.version.outputs.version }} 2>/dev/null || true
+          # Windows中用$null替代/dev/null
+          git tag -d ${{ steps.version.outputs.version }} 2>$null || $true
+          git push origin --delete ${{ steps.version.outputs.version }} 2>$null || $true
 
       - name: 创建并推送新标签
         run: |
